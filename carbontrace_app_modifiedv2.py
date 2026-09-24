@@ -765,6 +765,78 @@ def generate_recommendations(metrics, events):
     return recommendations
 
 
+
+# ============================================================
+# COMPANY / SITE FOOTPRINT ENGINE
+# ============================================================
+
+DEMO_COMPANY_FOOTPRINT = pd.DataFrame([
+    ["NorthStar Logistics Ltd", "Birmingham Distribution Centre", "Birmingham, UK", "2026-09-01", "2026-09-30", "Scope 2", "Electricity", 42000, "kWh", 0.2048, 8601.60, "CarbonTrace demo database", "ELEC-DEMO-001", "DEMO / UNVERIFIED"],
+    ["NorthStar Logistics Ltd", "Birmingham Distribution Centre", "Birmingham, UK", "2026-09-01", "2026-09-30", "Scope 1", "Natural gas", 15000, "kWh", 0.1800, 2700.00, "CarbonTrace demo database", "GAS-DEMO-001", "DEMO / UNVERIFIED"],
+    ["NorthStar Logistics Ltd", "Birmingham Distribution Centre", "Birmingham, UK", "2026-09-01", "2026-09-30", "Scope 1", "Fleet fuel", 3400, "L", 2.6176, 8900.00, "CarbonTrace demo database", "FLEET-DEMO-001", "DEMO / UNVERIFIED"],
+    ["NorthStar Logistics Ltd", "Birmingham Distribution Centre", "Birmingham, UK", "2026-09-01", "2026-09-30", "Scope 3", "Business travel", 1, "monthly dataset", 1200.0, 1200.00, "CarbonTrace demo database", "TRAVEL-DEMO-001", "DEMO / UNVERIFIED"],
+    ["NorthStar Logistics Ltd", "Birmingham Distribution Centre", "Birmingham, UK", "2026-09-01", "2026-09-30", "Scope 3", "Waste", 1, "monthly dataset", 650.0, 650.00, "CarbonTrace demo database", "WASTE-DEMO-001", "DEMO / UNVERIFIED"],
+    ["NorthStar Logistics Ltd", "Birmingham Distribution Centre", "Birmingham, UK", "2026-09-01", "2026-09-30", "Scope 1", "Refrigerants", 1, "monthly dataset", 418.4, 418.40, "CarbonTrace demo database", "REFRIG-DEMO-001", "DEMO / UNVERIFIED"],
+], columns=[
+    "company_name", "site_name", "site_location", "reporting_start", "reporting_end",
+    "scope", "activity_category", "activity_quantity", "activity_unit",
+    "emission_factor", "co2e_kg", "data_source", "evidence_reference",
+    "verification_status"
+])
+
+COMPANY_REQUIRED_COLUMNS = [
+    "company_name", "site_name", "site_location", "reporting_start", "reporting_end",
+    "scope", "activity_category", "activity_quantity", "activity_unit",
+    "emission_factor", "co2e_kg", "data_source", "evidence_reference",
+    "verification_status"
+]
+
+def validate_company_footprint(uploaded_df):
+    missing = [c for c in COMPANY_REQUIRED_COLUMNS if c not in uploaded_df.columns]
+    if missing:
+        return False, f"Missing required columns: {', '.join(missing)}"
+    cleaned = uploaded_df.copy()
+    cleaned["co2e_kg"] = pd.to_numeric(cleaned["co2e_kg"], errors="coerce")
+    cleaned["activity_quantity"] = pd.to_numeric(cleaned["activity_quantity"], errors="coerce")
+    cleaned["emission_factor"] = pd.to_numeric(cleaned["emission_factor"], errors="coerce")
+    if cleaned["co2e_kg"].isna().any():
+        return False, "The co2e_kg column contains invalid or blank values."
+    if (cleaned["co2e_kg"] < 0).any():
+        return False, "co2e_kg cannot contain negative values."
+    return True, cleaned
+
+def company_footprint_summary(company_df):
+    if company_df is None or company_df.empty:
+        return {
+            "company_name": "No company dataset loaded",
+            "site_name": "—",
+            "site_location": "—",
+            "reporting_period": "—",
+            "scope1_kg": 0.0, "scope2_kg": 0.0, "scope3_kg": 0.0,
+            "company_total_kg": 0.0,
+            "verification_status": "NO DATA",
+            "data_source": "No company dataset"
+        }
+
+    scope_totals = company_df.groupby("scope")["co2e_kg"].sum().to_dict()
+    first = company_df.iloc[0]
+    statuses = sorted(set(company_df["verification_status"].astype(str)))
+    sources = sorted(set(company_df["data_source"].astype(str)))
+
+    return {
+        "company_name": str(first["company_name"]),
+        "site_name": str(first["site_name"]),
+        "site_location": str(first["site_location"]),
+        "reporting_period": f"{first['reporting_start']} to {first['reporting_end']}",
+        "scope1_kg": float(scope_totals.get("Scope 1", 0.0)),
+        "scope2_kg": float(scope_totals.get("Scope 2", 0.0)),
+        "scope3_kg": float(scope_totals.get("Scope 3", 0.0)),
+        "company_total_kg": float(company_df["co2e_kg"].sum()),
+        "verification_status": " | ".join(statuses),
+        "data_source": " | ".join(sources)
+    }
+
+
 # ============================================================
 # ENVIRONMENTAL PROJECT ARCHITECTURE
 # ============================================================
@@ -999,6 +1071,20 @@ def build_impact_record(
         "Trip distance (km)": round(metrics["distance_km"], 2),
         "Trip estimated CO2 (kg)": round(metrics["co2_kg"], 2),
 
+        "Company": company_summary["company_name"],
+        "Facility": company_summary["site_name"],
+        "Facility location": company_summary["site_location"],
+        "Company reporting period": company_summary["reporting_period"],
+        "Company Scope 1 CO2e (kg)": round(company_summary["scope1_kg"], 2),
+        "Company Scope 2 CO2e (kg)": round(company_summary["scope2_kg"], 2),
+        "Company Scope 3 CO2e (kg)": round(company_summary["scope3_kg"], 2),
+        "Company footprint CO2e (kg)": round(company_summary["company_total_kg"], 2),
+        "Analytical consolidated CO2e (kg)": round(
+            company_summary["company_total_kg"] + metrics["co2_kg"], 2
+        ),
+        "Consolidation boundary status": "NOT VERIFIED AS SAME REPORTING BOUNDARY",
+        "Company footprint data status": company_summary["verification_status"],
+
         "Illustrative reduction opportunity (kg)": round(
             potential_reduction_kg, 2
         ),
@@ -1042,6 +1128,18 @@ def build_claim_audit_record(impact_record, selected_data):
         "Measurement source": data_mode,
         "Emissions data status": "Simulated / demonstration",
         "Emissions calculation status": "Illustrative demonstration calculation",
+
+        "Company footprint source": company_summary["data_source"],
+        "Company footprint status": company_summary["verification_status"],
+        "Company footprint CO2e (kg)": round(company_summary["company_total_kg"], 2),
+        "Company Scope 1 CO2e (kg)": round(company_summary["scope1_kg"], 2),
+        "Company Scope 2 CO2e (kg)": round(company_summary["scope2_kg"], 2),
+        "Company Scope 3 CO2e (kg)": round(company_summary["scope3_kg"], 2),
+        "Vehicle journey CO2 (kg)": round(metrics["co2_kg"], 2),
+        "Analytical consolidated CO2e (kg)": round(
+            company_summary["company_total_kg"] + metrics["co2_kg"], 2
+        ),
+        "Boundary compatibility": "Not established — analytical display only",
         "Project pathway": impact_record["Selected pathway"],
         "Project type": selected_data["type"],
         "Programme": impact_record["Programme"],
@@ -1203,6 +1301,33 @@ project_matches = match_projects(
 
 
 # ============================================================
+# COMPANY FOOTPRINT STATE
+# ============================================================
+
+if "company_footprint_df" not in st.session_state:
+    st.session_state.company_footprint_df = DEMO_COMPANY_FOOTPRINT.copy()
+
+if "company_footprint_mode" not in st.session_state:
+    st.session_state.company_footprint_mode = "CarbonTrace Demo Database"
+
+company_df = st.session_state.company_footprint_df
+company_summary = company_footprint_summary(company_df)
+
+# Keep organisational and journey boundaries separate.
+# Consolidated CO2e is shown only as an analytical view, not as a verified inventory total.
+combined_emissions = {
+    "vehicle_co2_kg": float(metrics["co2_kg"]),
+    "company_co2e_kg": float(company_summary["company_total_kg"]),
+    "scope1_co2e_kg": float(company_summary["scope1_kg"]),
+    "scope2_co2e_kg": float(company_summary["scope2_kg"]),
+    "scope3_co2e_kg": float(company_summary["scope3_kg"]),
+    "consolidated_co2e_kg": float(company_summary["company_total_kg"] + metrics["co2_kg"]),
+    "boundary_compatible": False,
+    "data_status": company_summary["verification_status"],
+}
+
+
+# ============================================================
 # IMPACT / CLAIM STATE
 # ============================================================
 
@@ -1333,6 +1458,7 @@ for col, (label, value) in zip(
 (
     tab_dashboard,
     tab_emissions,
+    tab_company,
     tab_ai,
     tab_reduce,
     tab_impact,
@@ -1340,7 +1466,8 @@ for col, (label, value) in zip(
 ) = st.tabs(
     [
         "🏠 Executive Dashboard",
-        "🧪 Emissions",
+        "🧪 Vehicle Emissions",
+        "🏢 Company Footprint",
         "🤖 AI Analysis",
         "⬇️ Reduce",
         "🌱 Impact",
@@ -1444,6 +1571,27 @@ with tab_dashboard:
                 unsafe_allow_html=True,
             )
 
+
+    st.divider()
+    st.subheader("🌍 Total Emissions Intelligence")
+
+    tc1, tc2, tc3, tc4, tc5, tc6 = st.columns(6)
+    tc1.metric("Company footprint", f"{company_summary['company_total_kg']:,.1f} kg CO₂e")
+    tc2.metric("ATLAS journey", f"{metrics['co2_kg']:,.2f} kg CO₂")
+    tc3.metric("Scope 1", f"{company_summary['scope1_kg']:,.1f} kg")
+    tc4.metric("Scope 2", f"{company_summary['scope2_kg']:,.1f} kg")
+    tc5.metric("Scope 3", f"{company_summary['scope3_kg']:,.1f} kg")
+    tc6.metric("Analytical combined", f"{combined_emissions['consolidated_co2e_kg']:,.1f} kg CO₂e")
+
+    st.caption(
+        f"Company/site: {company_summary['company_name']} — {company_summary['site_name']} | "
+        f"Location: {company_summary['site_location']} | Period: {company_summary['reporting_period']}"
+    )
+    st.warning(
+        "Boundary safeguard: the company footprint and the current ATLAS journey may represent different "
+        "reporting periods and organisational boundaries. The analytical combined value is therefore a "
+        "demonstration view, not a verified corporate inventory total."
+    )
 
     st.divider()
     st.subheader("🌱 Project Evidence & Impact Dashboard")
@@ -1660,6 +1808,189 @@ with tab_emissions:
 
 
 # ============================================================
+# COMPANY FOOTPRINT
+# ============================================================
+
+with tab_company:
+
+    st.subheader("🏢 Company / site footprint intelligence")
+    st.write(
+        "Combine company activity data with ATLAS journey measurements while preserving "
+        "the reporting boundary, evidence source and verification status of each stream."
+    )
+
+    source_mode = st.radio(
+        "Company footprint source",
+        [
+            "CarbonTrace Demo Database",
+            "Upload Company Data",
+            "External Data/API [Future]",
+        ],
+        index=[
+            "CarbonTrace Demo Database",
+            "Upload Company Data",
+            "External Data/API [Future]",
+        ].index(st.session_state.company_footprint_mode)
+        if st.session_state.company_footprint_mode in [
+            "CarbonTrace Demo Database",
+            "Upload Company Data",
+            "External Data/API [Future]",
+        ] else 0,
+        horizontal=True,
+        key="company_source_mode",
+    )
+
+    if source_mode == "CarbonTrace Demo Database":
+        if st.button("Load / reset demonstration company", use_container_width=True):
+            st.session_state.company_footprint_df = DEMO_COMPANY_FOOTPRINT.copy()
+            st.session_state.company_footprint_mode = source_mode
+            st.rerun()
+
+        st.info(
+            "The built-in NorthStar Logistics Ltd dataset is fictional demonstration data. "
+            "It must not be interpreted as emissions information about a real company."
+        )
+
+    elif source_mode == "Upload Company Data":
+        uploaded_company_file = st.file_uploader(
+            "📤 Upload Company Footprint CSV",
+            type=["csv"],
+            help="Use the downloadable template supplied with this prototype.",
+            key="company_footprint_upload",
+        )
+
+        if uploaded_company_file is not None:
+            try:
+                uploaded_company_df = pd.read_csv(uploaded_company_file)
+                valid, result = validate_company_footprint(uploaded_company_df)
+                if valid:
+                    st.session_state.company_footprint_df = result
+                    st.session_state.company_footprint_mode = source_mode
+                    st.success(
+                        f"Loaded {len(result)} company-footprint records. "
+                        "The dataset is treated as user-supplied and unverified unless evidence says otherwise."
+                    )
+                    company_df = result
+                    company_summary = company_footprint_summary(company_df)
+                    combined_emissions = {
+                        "vehicle_co2_kg": float(metrics["co2_kg"]),
+                        "company_co2e_kg": float(company_summary["company_total_kg"]),
+                        "scope1_co2e_kg": float(company_summary["scope1_kg"]),
+                        "scope2_co2e_kg": float(company_summary["scope2_kg"]),
+                        "scope3_co2e_kg": float(company_summary["scope3_kg"]),
+                        "consolidated_co2e_kg": float(company_summary["company_total_kg"] + metrics["co2_kg"]),
+                        "boundary_compatible": False,
+                        "data_status": company_summary["verification_status"],
+                    }
+                else:
+                    st.error(result)
+            except Exception as exc:
+                st.error(f"Could not read the uploaded CSV: {exc}")
+
+    else:
+        st.info(
+            "Future connector layer: electricity/smart meter, gas/energy, fleet management, "
+            "travel, ERP/procurement, waste provider and carbon-accounting data sources."
+        )
+        connector_df = pd.DataFrame([
+            ["Electricity / smart meter", "Future connector"],
+            ["Gas / energy", "Future connector"],
+            ["Fleet management", "Future connector"],
+            ["Travel system", "Future connector"],
+            ["ERP / procurement", "Future connector"],
+            ["Waste provider", "Future connector"],
+            ["Carbon accounting database", "Future connector"],
+        ], columns=["Data source", "Status"])
+        st.dataframe(connector_df, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    company_df = st.session_state.company_footprint_df
+    company_summary = company_footprint_summary(company_df)
+
+    st.markdown("### Company identity & reporting boundary")
+    i1, i2, i3, i4 = st.columns(4)
+    i1.metric("Company", company_summary["company_name"])
+    i2.metric("Site", company_summary["site_name"])
+    i3.metric("Location", company_summary["site_location"])
+    i4.metric("Data status", company_summary["verification_status"])
+
+    st.caption(f"Reporting period: {company_summary['reporting_period']}")
+
+    st.markdown("### Scope 1 / 2 / 3 footprint")
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Scope 1", f"{company_summary['scope1_kg']:,.1f} kg CO₂e", "Direct emissions")
+    s2.metric("Scope 2", f"{company_summary['scope2_kg']:,.1f} kg CO₂e", "Purchased energy")
+    s3.metric("Scope 3", f"{company_summary['scope3_kg']:,.1f} kg CO₂e", "Value chain")
+    s4.metric("Company footprint", f"{company_summary['company_total_kg']:,.1f} kg CO₂e")
+
+    category_df = (
+        company_df.groupby(["scope", "activity_category"], as_index=False)["co2e_kg"]
+        .sum()
+        .sort_values("co2e_kg", ascending=False)
+    )
+
+    fig_company = go.Figure(
+        go.Bar(
+            x=category_df["activity_category"],
+            y=category_df["co2e_kg"],
+            text=category_df["scope"],
+        )
+    )
+    fig_company.update_layout(
+        title="Company emissions by activity source",
+        xaxis_title="Activity source",
+        yaxis_title="kg CO₂e",
+        height=360,
+    )
+    st.plotly_chart(fig_company, use_container_width=True)
+
+    st.markdown("### Source data & evidence")
+    st.dataframe(company_df, use_container_width=True, hide_index=True)
+
+    st.download_button(
+        "📥 Download current company footprint CSV",
+        data=company_df.to_csv(index=False).encode("utf-8"),
+        file_name="carbontrace_company_footprint_current.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+    st.divider()
+    st.markdown("### 🌍 Total Emissions Intelligence")
+
+    combined_now = company_summary["company_total_kg"] + metrics["co2_kg"]
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Company footprint", f"{company_summary['company_total_kg']:,.1f} kg CO₂e")
+    c2.metric("ATLAS current journey", f"{metrics['co2_kg']:,.2f} kg CO₂")
+    c3.metric("Analytical combined view", f"{combined_now:,.1f} kg CO₂e")
+
+    st.warning(
+        "Do not interpret the analytical combined view as a verified total unless the company dataset "
+        "and ATLAS journey have been confirmed to belong to the same inventory boundary and reporting period."
+    )
+
+    st.markdown("### 🤖 Company footprint intelligence")
+    if not category_df.empty:
+        largest = category_df.iloc[0]
+        pct = (
+            largest["co2e_kg"] / company_summary["company_total_kg"] * 100
+            if company_summary["company_total_kg"] > 0 else 0
+        )
+        st.info(
+            f"Largest recorded company source: {largest['activity_category']} "
+            f"({largest['co2e_kg']:,.1f} kg CO₂e; {pct:.1f}% of this dataset). "
+            "Investigate this source first for operational reduction opportunities, subject to data quality and feasibility."
+        )
+
+    st.caption(
+        "Company-footprint values are accepted from the demo database or uploaded CSV. "
+        "Production CarbonTrace should calculate or validate CO₂e using versioned emission factors, "
+        "source evidence and an appropriate organisational carbon-accounting methodology."
+    )
+
+
+# ============================================================
 # AI ANALYSIS
 # ============================================================
 
@@ -1747,6 +2078,38 @@ with tab_ai:
             """,
             unsafe_allow_html=True,
         )
+
+    st.divider()
+    st.markdown("### 🏢 Corporate footprint recommendations")
+
+    company_ai_df = (
+        st.session_state.company_footprint_df
+        .groupby(["scope", "activity_category"], as_index=False)["co2e_kg"]
+        .sum()
+        .sort_values("co2e_kg", ascending=False)
+    )
+    if not company_ai_df.empty:
+        for _, crow in company_ai_df.head(3).iterrows():
+            share = (
+                crow["co2e_kg"] / company_summary["company_total_kg"] * 100
+                if company_summary["company_total_kg"] > 0 else 0
+            )
+            st.markdown(
+                f"""
+                <div class="recommendation">
+                    <b>{crow['scope']} — COMPANY FOOTPRINT</b>
+                    <h3>Investigate {crow['activity_category']}</h3>
+                    <p><b>Why CarbonTrace flagged this:</b><br>
+                    {crow['activity_category']} contributes {crow['co2e_kg']:,.1f} kg CO₂e
+                    ({share:.1f}% of the loaded company dataset).</p>
+                    <p><b>Recommended action:</b><br>
+                    Validate the underlying activity data and emission factor, then assess practical
+                    operational or procurement reduction measures.</p>
+                    <p><b>Status:</b> Decision-support recommendation; not a verified reduction claim.</p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
     st.caption(
         "AI recommendations shown here are demonstration rules. "
@@ -1847,6 +2210,20 @@ with tab_reduce:
         "The 11% reduction figure is illustrative demonstration "
         "logic only. Production CarbonTrace must calculate reduction "
         "potential from validated vehicle-specific evidence."
+    )
+
+    st.divider()
+    st.markdown("### 🏢 Company-level reduction context")
+
+    rc1, rc2, rc3, rc4 = st.columns(4)
+    rc1.metric("Scope 1", f"{company_summary['scope1_kg']:,.1f} kg CO₂e")
+    rc2.metric("Scope 2", f"{company_summary['scope2_kg']:,.1f} kg CO₂e")
+    rc3.metric("Scope 3", f"{company_summary['scope3_kg']:,.1f} kg CO₂e")
+    rc4.metric("Loaded footprint", f"{company_summary['company_total_kg']:,.1f} kg CO₂e")
+
+    st.info(
+        "Company-level reduction opportunities are prioritised from the loaded activity dataset. "
+        "No fixed percentage reduction is automatically applied to the organisational footprint."
     )
 
     st.divider()
@@ -2303,6 +2680,12 @@ with tab_data:
                 "IMPACT",
                 "Environmental project records",
                 "Evidence + traceability",
+            ],
+            [
+                "Layer 4A",
+                "ORGANISATIONAL FOOTPRINT",
+                "Company/site Scope 1, 2 and 3 activity data",
+                "Preserve source, period, boundary and evidence",
             ],
             [
                 "Layer 5",
